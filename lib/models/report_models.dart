@@ -58,15 +58,24 @@ class DailyPoint {
   final int invoiceCount;
   final double billed;
   final double cogs;
+  // Part of [billed] / profit that is covered by payments received.
+  final double paidSales;
+  final double paidProfit;
 
   const DailyPoint({
     required this.date,
     required this.invoiceCount,
     required this.billed,
     this.cogs = 0.0,
+    this.paidSales = 0.0,
+    this.paidProfit = 0.0,
   });
 
   double get profit => billed - cogs;
+
+  double get unpaidSales => billed - paidSales;
+
+  double get pendingProfit => profit - paidProfit;
 
   double get marginPercent => billed == 0 ? 0.0 : (profit / billed) * 100;
 }

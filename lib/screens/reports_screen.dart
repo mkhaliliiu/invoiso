@@ -3743,6 +3743,7 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                                 .skip(_dailyPage * _dailyPageSize)
                                 .take(_dailyPageSize)
                                 .map(_dailyRow),
+                            _dailyTotalRow(),
                             _buildReportPagination(
                               currentPage: _dailyPage,
                               pageSize: _dailyPageSize,
@@ -3875,19 +3876,21 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: Row(
         children: [
-          Expanded(flex: 2, child: _TableHead(l10n.invoiceMgmtColDate)),
-          Expanded(flex: 1, child: _TableHead(l10n.navInvoices, right: true)),
+          // Narrow Date + Invoices on the left; money columns share the rest.
+          Expanded(flex: 5, child: _TableHead(l10n.invoiceMgmtColDate)),
+          Expanded(flex: 4, child: _TableHead(l10n.navInvoices)),
           Expanded(
-              flex: 2,
+              flex: 7,
               child: _TableHead(l10n.reportsSalesColumnLabel, right: true)),
+          const Expanded(flex: 7, child: _TableHead('Paid', right: true)),
+          const Expanded(flex: 7, child: _TableHead('Unpaid', right: true)),
           Expanded(
-              flex: 2,
+              flex: 7,
               child: _TableHead(l10n.reportsCogsColumnLabel, right: true)),
-          Expanded(
-              flex: 2, child: _TableHead(l10n.reportsProfitLabel, right: true)),
-          Expanded(
-              flex: 1,
-              child: _TableHead(l10n.reportsMarginColumnLabel, right: true)),
+          const Expanded(
+              flex: 7, child: _TableHead('Profit\nReceived', right: true)),
+          const Expanded(
+              flex: 7, child: _TableHead('Profit\nPending', right: true)),
         ],
       ),
     );
@@ -3905,6 +3908,46 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
     _loadTab(6);
   }
 
+  static const _dailyGreen = Color(0xFF16A34A);
+  static const _dailyRed = Color(0xFFDC2626);
+
+  // One row of the daily table. Used for each day and for the TOTAL row.
+  Widget _dailyCells({
+    required Widget dateCell,
+    required int invoices,
+    required DailyPoint v,
+    bool bold = false,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    final base = TextStyle(
+        fontSize: bold ? 14 : 13,
+        fontWeight: bold ? FontWeight.w700 : FontWeight.w400);
+    final strong = base.copyWith(
+        fontWeight: bold ? FontWeight.w700 : FontWeight.w600);
+    Widget cell(int flex, String text, TextStyle style) => Expanded(
+        flex: flex,
+        child: Text(text, textAlign: TextAlign.right, style: style));
+
+    // Column widths must match _dailyTableHeader (5, 4, then 7 each).
+    return Row(
+      children: [
+        Expanded(flex: 5, child: dateCell),
+        Expanded(
+            flex: 4,
+            child: Text(_fmtInt.format(invoices),
+                style: base.copyWith(color: cs.onSurfaceVariant))),
+        cell(7, _money(v.billed),
+            strong.copyWith(color: const Color(0xFF1D4ED8))),
+        cell(7, _money(v.paidSales), strong.copyWith(color: _dailyGreen)),
+        cell(7, _money(v.unpaidSales), strong.copyWith(color: _dailyRed)),
+        cell(7, _money(v.cogs), base.copyWith(color: cs.onSurfaceVariant)),
+        cell(7, _money(v.paidProfit),
+            strong.copyWith(color: v.paidProfit < 0 ? _dailyRed : _dailyGreen)),
+        cell(7, _money(v.pendingProfit), strong.copyWith(color: _dailyRed)),
+      ],
+    );
+  }
+
   Widget _dailyRow(DailyPoint d) {
     return InkWell(
       onTap: () => _openDayInInvoiceStatus(d.date),
@@ -3914,58 +3957,55 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                 top: BorderSide(
                     color: Theme.of(context).colorScheme.outlineVariant))),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        child: Row(
-          children: [
-            Expanded(
-                flex: 2,
-                child: Text(_formatStoredDate(d.date),
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.onSurface))),
-            Expanded(
-                flex: 1,
-                child: Text(_fmtInt.format(d.invoiceCount),
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color:
-                            Theme.of(context).colorScheme.onSurfaceVariant))),
-            Expanded(
-                flex: 2,
-                child: Text(_money(d.billed),
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1D4ED8)))),
-            Expanded(
-                flex: 2,
-                child: Text(_money(d.cogs),
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color:
-                            Theme.of(context).colorScheme.onSurfaceVariant))),
-            Expanded(
-                flex: 2,
-                child: Text(_money(d.profit),
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: d.profit < 0
-                            ? const Color(0xFFDC2626)
-                            : const Color(0xFF16A34A)))),
-            Expanded(
-                flex: 1,
-                child: Text('${d.marginPercent.toStringAsFixed(0)}%',
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color:
-                            Theme.of(context).colorScheme.onSurfaceVariant))),
-          ],
+        child: _dailyCells(
+          dateCell: Text(_formatStoredDate(d.date),
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.onSurface)),
+          invoices: d.invoiceCount,
+          v: d,
         ),
+      ),
+    );
+  }
+
+  // Totals across the WHOLE selected period (all pages, not just this page).
+  Widget _dailyTotalRow() {
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    int invoices = 0;
+    double sales = 0, cogs = 0, paidSales = 0, paidProfit = 0;
+    for (final d in _dailyReport) {
+      invoices += d.invoiceCount;
+      sales += d.billed;
+      cogs += d.cogs;
+      paidSales += d.paidSales;
+      paidProfit += d.paidProfit;
+    }
+    final total = DailyPoint(
+      date: '',
+      invoiceCount: invoices,
+      billed: sales,
+      cogs: cogs,
+      paidSales: paidSales,
+      paidProfit: paidProfit,
+    );
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        border: Border(top: BorderSide(color: cs.outline, width: 1.5)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      child: _dailyCells(
+        dateCell: Text(l10n.reportsTotalRowLabel.toUpperCase(),
+            style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: cs.onSurface)),
+        invoices: invoices,
+        v: total,
+        bold: true,
       ),
     );
   }

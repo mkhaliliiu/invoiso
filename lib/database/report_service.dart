@@ -382,15 +382,24 @@ class ReportService {
 
     // Sales = tax-exclusive product revenue after invoice discount; profit
     // subtracts COGS. Both keep the same basis as the Revenue-tab profit KPI.
+    // Paid share: sales and profit are split by the fraction of the invoice
+    // total that has been paid (a half-paid invoice counts half as paid).
     final countByDay = <String, int>{};
     final netByDay = <String, double>{};
     final cogsByDay = <String, double>{};
+    final paidNetByDay = <String, double>{};
+    final paidProfitByDay = <String, double>{};
     for (final r in rows) {
       if (r.date.length < 10) continue;
       final d = r.date.substring(0, 10);
+      final paidFraction =
+          r.total <= 0 ? 0.0 : (r.paid / r.total).clamp(0.0, 1.0);
+      final profit = r.netRevenue - r.cogs;
       countByDay[d] = (countByDay[d] ?? 0) + 1;
       netByDay[d] = (netByDay[d] ?? 0) + r.netRevenue;
       cogsByDay[d] = (cogsByDay[d] ?? 0) + r.cogs;
+      paidNetByDay[d] = (paidNetByDay[d] ?? 0) + r.netRevenue * paidFraction;
+      paidProfitByDay[d] = (paidProfitByDay[d] ?? 0) + profit * paidFraction;
     }
 
     final days = countByDay.keys.toList()..sort();
@@ -400,6 +409,8 @@ class ReportService {
               invoiceCount: countByDay[d]!,
               billed: netByDay[d] ?? 0.0,
               cogs: cogsByDay[d] ?? 0.0,
+              paidSales: paidNetByDay[d] ?? 0.0,
+              paidProfit: paidProfitByDay[d] ?? 0.0,
             ))
         .toList();
   }
@@ -1113,17 +1124,45 @@ class ReportService {
   // ── CSV export helpers ─────────────────────────────────────────────────────
 
   static String exportDailyReportCsv(List<DailyPoint> rows) {
+    String n(double v) => v.toStringAsFixed(2);
+    final tInvoices = rows.fold<int>(0, (a, d) => a + d.invoiceCount);
+    final tSales = rows.fold<double>(0, (a, d) => a + d.billed);
+    final tPaid = rows.fold<double>(0, (a, d) => a + d.paidSales);
+    final tCogs = rows.fold<double>(0, (a, d) => a + d.cogs);
+    final tPaidProfit = rows.fold<double>(0, (a, d) => a + d.paidProfit);
+    final tProfit = tSales - tCogs;
     return buildQuotedCsv([
-      ['Date', 'Invoices', 'Sales', 'COGS', 'Profit', 'Margin %'],
+      [
+        'Date',
+        'Invoices',
+        'Sales',
+        'Paid',
+        'Unpaid',
+        'COGS',
+        'Profit Received',
+        'Profit Pending',
+      ],
       for (final d in rows)
         [
           d.date,
           d.invoiceCount,
-          d.billed.toStringAsFixed(2),
-          d.cogs.toStringAsFixed(2),
-          d.profit.toStringAsFixed(2),
-          d.marginPercent.toStringAsFixed(1),
+          n(d.billed),
+          n(d.paidSales),
+          n(d.unpaidSales),
+          n(d.cogs),
+          n(d.paidProfit),
+          n(d.pendingProfit),
         ],
+      [
+        'TOTAL',
+        tInvoices,
+        n(tSales),
+        n(tPaid),
+        n(tSales - tPaid),
+        n(tCogs),
+        n(tPaidProfit),
+        n(tProfit - tPaidProfit),
+      ],
     ]);
   }
 
@@ -1453,7 +1492,8 @@ class ReportService {
     final dateFmt = (await BackendServices.settings.getDateFormat()).key;
     final generatedOn = DateFormat(dateFmt).format(DateTime.now());
 
-    String money(double v) => '$currencySymbol ${v.toStringAsFixed(2)}';
+    final numFmt = NumberFormat('#,##0.00');
+    String money(double v) => '$currencySymbol ${numFmt.format(v)}';
     String fmtDate(String v) {
       final d = DateTime.tryParse(v);
       return d == null ? v : DateFormat(dateFmt).format(d);
@@ -1461,13 +1501,48 @@ class ReportService {
 
     final totalInvoices = rows.fold<int>(0, (a, d) => a + d.invoiceCount);
     final totalSales = rows.fold<double>(0, (a, d) => a + d.billed);
+    final totalPaid = rows.fold<double>(0, (a, d) => a + d.paidSales);
     final totalCogs = rows.fold<double>(0, (a, d) => a + d.cogs);
+    final totalPaidProfit = rows.fold<double>(0, (a, d) => a + d.paidProfit);
     final totalProfit = totalSales - totalCogs;
-    final totalMargin = totalSales == 0 ? 0.0 : (totalProfit / totalSales) * 100;
+
+    // Column colours, same as the on-screen report.
+    const blue = PdfColor.fromInt(0xFF1D4ED8);
+    const green = PdfColor.fromInt(0xFF16A34A);
+    const red = PdfColor.fromInt(0xFFDC2626);
+    const colColors = <int, PdfColor>{3: blue, 4: green, 5: red, 7: green, 8: red};
+
+    final data = <List<String>>[
+      for (var i = 0; i < rows.length; i++)
+        [
+          '${i + 1}',
+          fmtDate(rows[i].date),
+          '${rows[i].invoiceCount}',
+          money(rows[i].billed),
+          money(rows[i].paidSales),
+          money(rows[i].unpaidSales),
+          money(rows[i].cogs),
+          money(rows[i].paidProfit),
+          money(rows[i].pendingProfit),
+        ],
+      [
+        '',
+        'TOTAL',
+        '$totalInvoices',
+        money(totalSales),
+        money(totalPaid),
+        money(totalSales - totalPaid),
+        money(totalCogs),
+        money(totalPaidProfit),
+        money(totalProfit - totalPaidProfit),
+      ],
+    ];
+    // Header is row 0, so the TOTAL row is row data.length.
+    final totalRowNum = data.length;
 
     doc.addPage(
       pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
+        pageFormat: PdfPageFormat.a4.landscape,
         margin: const pw.EdgeInsets.all(24),
         header: (context) => pw.Column(
           crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -1491,52 +1566,49 @@ class ReportService {
         ),
         build: (context) => [
           pw.TableHelper.fromTextArray(
-            headers: ['SL', 'Date', 'Invoices', 'Sales', 'COGS', 'Profit', 'Margin %'],
-            data: List<List<String>>.generate(rows.length, (i) {
-              final d = rows[i];
-              return [
-                '${i + 1}',
-                fmtDate(d.date),
-                '${d.invoiceCount}',
-                money(d.billed),
-                money(d.cogs),
-                money(d.profit),
-                '${d.marginPercent.toStringAsFixed(1)}%',
-              ];
-            }),
+            headers: [
+              'SL',
+              'Date',
+              'Invoices',
+              'Sales',
+              'Paid',
+              'Unpaid',
+              'COGS',
+              'Profit\nReceived',
+              'Profit\nPending',
+            ],
+            data: data,
             headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9, color: PdfColors.white),
+            headerAlignments: {
+              0: pw.Alignment.centerRight,
+              1: pw.Alignment.centerLeft,
+              2: pw.Alignment.centerLeft,
+              for (var c = 3; c <= 8; c++) c: pw.Alignment.centerRight,
+            },
             cellStyle: const pw.TextStyle(fontSize: 9),
+            textStyleBuilder: (index, _, rowNum) {
+              final isTotal = rowNum == totalRowNum;
+              return pw.TextStyle(
+                fontSize: isTotal ? 10 : 9,
+                fontWeight: isTotal ? pw.FontWeight.bold : pw.FontWeight.normal,
+                color: colColors[index] ?? PdfColors.black,
+              );
+            },
+            cellDecoration: (index, _, rowNum) => rowNum == totalRowNum
+                ? const pw.BoxDecoration(
+                    color: PdfColors.grey200,
+                    border: pw.Border(top: pw.BorderSide(width: 1.2)),
+                  )
+                : const pw.BoxDecoration(),
             headerDecoration: const pw.BoxDecoration(color: PdfReportHeader.accentColor),
             cellAlignments: {
               0: pw.Alignment.centerRight,
               1: pw.Alignment.centerLeft,
-              2: pw.Alignment.centerRight,
-              3: pw.Alignment.centerRight,
-              4: pw.Alignment.centerRight,
-              5: pw.Alignment.centerRight,
-              6: pw.Alignment.centerRight,
+              2: pw.Alignment.centerLeft,
+              for (var c = 3; c <= 8; c++) c: pw.Alignment.centerRight,
             },
             cellHeight: 22,
             oddRowDecoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFF8FAFC)),
-          ),
-          pw.SizedBox(height: 12),
-          pw.Container(
-            padding: const pw.EdgeInsets.all(10),
-            decoration: pw.BoxDecoration(
-              color: PdfColors.grey100,
-              borderRadius: pw.BorderRadius.circular(4),
-            ),
-            child: pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.end,
-              children: [
-                pw.Text(
-                  'Total — Invoices: $totalInvoices   Sales: ${money(totalSales)}   '
-                  'COGS: ${money(totalCogs)}   Profit: ${money(totalProfit)}   '
-                  'Margin: ${totalMargin.toStringAsFixed(1)}%',
-                  style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
-                ),
-              ],
-            ),
           ),
         ],
       ),

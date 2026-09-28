@@ -598,7 +598,46 @@ class InvoiceService {
 
   // ─────────────────────────────────────────────
   // Soft Delete
+    // ─────────────────────────────────────────────
+  // Stock helpers (custom: return stock when an invoice is deleted)
+
+  /// Adds (sign = +1) or removes (sign = -1) this invoice's item quantities
+  /// to/from product stock. Unlimited-stock and no-longer-existing products
+  /// are skipped.
+  static Future<void> _adjustStockForInvoice(String invoiceId, int sign) async {
+    final db = await dbHelper.database;
+    final items = await db.query(
+      'invoice_items',
+      columns: ['product_id', 'quantity'],
+      where: 'invoice_id = ?',
+      whereArgs: [invoiceId],
+    );
+    for (final item in items) {
+      final productId = item['product_id'] as String?;
+      final rawQty = item['quantity'] as num?;
+      if (productId == null || rawQty == null) continue;
+      final product = await ProductService.getProductById(productId);
+      if (product == null || product.unlimitedStock) continue;
+      await ProductService.updateProductStock(
+          product.id, product.stock + sign * rawQty.round());
+    }
+  }
+
+  static Future<bool> _isInTrash(String id) async {
+    final db = await dbHelper.database;
+    final rows = await db.query(
+      'invoices',
+      columns: ['deleted_at'],
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    return rows.isNotEmpty && rows.first['deleted_at'] != null;
+  }
+
+  // ─────────────────────────────────────────────
+  // Soft Delete (move to Trash) -> items go back into stock
   static Future<void> softDeleteInvoice(String id) async {
+    if (await _isInTrash(id)) return; // already in Trash, stock already returned
     final db = await dbHelper.database;
     await db.update(
       'invoices',
@@ -606,9 +645,12 @@ class InvoiceService {
       where: 'id = ?',
       whereArgs: [id],
     );
+    await _adjustStockForInvoice(id, 1);
   }
 
+  // Restore from Trash -> items are taken out of stock again
   static Future<void> restoreInvoice(String id) async {
+    if (!await _isInTrash(id)) return;
     final db = await dbHelper.database;
     await db.update(
       'invoices',
@@ -616,9 +658,15 @@ class InvoiceService {
       where: 'id = ?',
       whereArgs: [id],
     );
+    await _adjustStockForInvoice(id, -1);
   }
 
+  // Permanent delete -> return stock only if it wasn't already returned
+  // when the invoice went to Trash
   static Future<void> permanentDeleteInvoice(String id) async {
+    if (!await _isInTrash(id)) {
+      await _adjustStockForInvoice(id, 1);
+    }
     final db = await dbHelper.database;
     await db.transaction((txn) async {
       await txn.delete('invoice_items', where: 'invoice_id = ?', whereArgs: [id]);
